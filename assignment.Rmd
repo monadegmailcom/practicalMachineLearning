@@ -1,0 +1,136 @@
+---
+title: "Practical Machine Learning"
+author: "monade"
+date: "15 November 2015"
+output: html_document
+---
+
+Load required libraries
+```{r, error=FALSE, warning=FALSE, message=FALSE}
+library(caret)
+library(gbm)
+library(survival)
+library(plyr)
+library(dplyr)
+```
+
+Load raw data
+```{r}
+raw_data <- read.csv("pml-training.csv")
+```
+
+###Predict exercise type###
+
+```{r}
+getModel <- function( data, name, variance_rate )
+{
+  # filter user 
+  data <- filter( data, user_name == name )
+
+  # Remove some columns with obviously no significance as predictors like counter 
+  # or datetime variables
+  data <- select(
+    data, 
+    -c(X, user_name, cvtd_timestamp, raw_timestamp_part_1, raw_timestamp_part_2))
+
+  # To reduce the number of covarites we impute the data and calculate all column indices 
+  # with near zero variance variables.
+  pre <- preProcess(raw_data, method="medianImpute")
+  rd <- predict( pre, data )
+  nzv <- nearZeroVar(rd)
+  data <- data[,-nzv]
+  
+  # create partition
+  part <- createDataPartition(data$classe, p=0.75, list=FALSE)
+
+  # get training data and testing data
+  training <- data[part,]
+  testing  <- data[-part,]
+
+  # PCA
+  preProc <- preProcess( 
+    select( training, -classe), 
+    method=c("center", "scale", "pca"), 
+    thresh=variance_rate)
+  
+  # apply pca to training data
+  trainPC <- predict(preProc, select( training, -classe))
+  
+  # fit model with tree boosting, may take a while
+  fit <- train(training$classe~., method="gbm", data=trainPC, verbose=FALSE)
+  
+  # apply pca to test data
+  testPC <- predict(preProc, select( testing, -classe) )
+
+  # get confusion matrix
+  cm <- confusionMatrix( testing$classe, predict( fit, testPC ))
+
+  list( preProc=preProc, fit=fit, cm=cm, nzv=nzv )
+}
+```
+
+Get models for each user. I print out the number of used principle components and the accuracy, which is 1 - out of sample error. The calculation is quite time consuming, so for cross validation the calculation is done only twice. You can see the stability of the accuracy/out of sample error.
+```{r}
+# set seed
+set.seed(37)
+# get all user names
+names <- names(table(raw_data$user_name))
+# set threshold for pca
+thresh = 0.95
+# model result list
+result = list()
+for (j in 1:2)
+{
+  result = list()
+  for (name in names)
+  {
+    # get model for user
+    l <- getModel( raw_data, name, thresh )
+    print( name )
+    print( l$preProc$numComp )
+    print( l$cm$overall["Accuracy"] )
+    
+    result[[name]] <- l
+  }
+}
+```
+
+Read and preprocess pml.testing 
+```{r}
+pml.testing <- read.csv("pml-testing.csv")
+
+pml.testing <- select(
+  pml.testing, 
+  -c(X, cvtd_timestamp, raw_timestamp_part_1, raw_timestamp_part_2))
+```
+
+Apply model to testing data
+```{r}
+answers = c()
+for (i in 1:nrow(pml.testing))
+{
+  # get observation
+  obs <- pml.testing[i,]
+  # get matching model by user
+  model <- result[[obs$user_name]]
+  # remove nzv columns
+  obs <- select( obs, -user_name)
+  obs <- select(obs, -model$nzv)
+  # apply pca
+  obs <- predict( model$preProc, obs)
+  # save prediction
+  answers[i] <- as.character( predict(model$fit, select(obs, -problem_id)))
+}
+
+answers
+```
+
+Write files
+```{r}
+for (i in 1:length( answers))
+{
+  file_name <- paste0( "problem_id_", i, ".txt")
+  write.table( answers[i], file=file_name, quote=FALSE,row.names=FALSE,col.names=FALSE)
+}
+```
+
